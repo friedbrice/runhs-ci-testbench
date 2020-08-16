@@ -1,0 +1,302 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  Consistency:
+    name: Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Version is increasing
+        run: |
+          HEAD_VERSION=$(cat runhs.cabal | grep ^version | cut -d' ' -f2)
+          RELEASE_VERSION=$(git describe --tags | cut -d'-' -f1 | cut -d'v' -f2)
+          [[ $HEAD_VERSION > $RELEASE_VERSION ]]
+
+      - name: No cabal package format warnings
+        run: |
+          WARNINGS=$(stack sdist . 2>&1 | tail -n 1)
+          [[ $WARNINGS == "Checking package 'runhs' for common mistakes" ]]
+
+  Compat:
+    name: Compat
+    needs:
+      - Consistency
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        resolver:
+          - lts-16
+          - lts-14
+          - lts-12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Cache Stack directory
+        uses: actions/cache@v1
+        with:
+          path: ~/.stack
+          key: stack-cache-Compat-${{ matrix.resolver }}
+
+      - name: Build
+        run: |
+          stack clean
+          stack build --resolver ${{ matrix.resolver }}
+          stack test --resolver ${{ matrix.resolver }}
+
+  Linux:
+    name: Linux
+    needs:
+      - Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Cache Stack directory
+        uses: actions/cache@v1
+        with:
+          path: ~/.stack
+          key: stack-cache-Linux-2
+
+      - name: Build
+        run: |
+          stack clean
+          stack build --resolver nightly --ghc-options="-split-sections -O2"
+          stack test --resolver nightly --ghc-options="-split-sections -O2"
+
+      - name: Copy artifact
+        run: |
+          cp $(stack exec --resolver nightly which runhs) runhs
+
+      - name: Compress artifact
+        uses: svenstaro/upx-action@v2
+        with:
+          file: runhs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: linux
+          path: runhs
+
+  Mac:
+    name: Mac
+    needs:
+      - Consistency
+    runs-on: macOS-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Cache Stack directory
+        uses: actions/cache@v1
+        with:
+          path: ~/.stack
+          key: stack-cache-Mac-2
+
+      - name: Build
+        run: |
+          stack clean
+          stack build --resolver nightly --ghc-options="-O2"
+          stack test --resolver nightly --ghc-options="-O2"
+
+      - name: Copy artifact
+        run: |
+          cp $(stack exec --resolver nightly which runhs) runhs
+
+      - name: Compress artifact
+        uses: svenstaro/upx-action@v2
+        with:
+          file: runhs
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: mac
+          path: runhs
+
+  Windows:
+    name: Windows
+    needs:
+      - Consistency
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Cache Stack directory
+        uses: actions/cache@v1
+        with:
+          path: 'C:\Users\runneradmin\AppData\Roaming\stack'
+          key: stack-cache-Windows-2
+
+      - name: Cache GHC
+        uses: actions/cache@v1
+        with:
+          path: 'C:\Users\runneradmin\AppData\Local\Programs\stack'
+          key: ghc-cache-Windows-2
+
+      - name: Build
+        run: |
+          stack clean
+          stack build --resolver nightly --ghc-options="-split-sections -O2"
+          stack test --resolver nightly --ghc-options="-split-sections -O2"
+
+      - name: Copy artifact
+        run: |
+          copy (stack exec --resolver nightly where runhs) runhs.exe
+
+      - name: Compress artifact
+        uses: svenstaro/upx-action@v2
+        with:
+          file: runhs.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: windows
+          path: runhs.exe
+
+  Release:
+    name: Release
+    needs:
+      - Compat
+      - Linux
+      - Mac
+      - Windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Read Version
+        id: read_version
+        run: |
+          echo "##[set-output name=version;]$(cat runhs.cabal | grep '^version' | cut -d ':' -f 2 | tr -d '[:space:]')"
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.read_version.outputs.version }}
+          release_name: Release v${{ steps.read_version.outputs.version }}
+          draft: false
+          prerelease: false
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: linux
+
+      - name: Compress Linux artifact
+        run: |
+          chmod +x runhs
+          zip linux.zip runhs
+
+      - name: Download Mac artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: mac
+
+      - name: Compress Mac artifact
+        run: |
+          chmod +x runhs
+          zip mac.zip runhs
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: windows
+
+      - name: Compress Windows artifact
+        run: |
+          zip windows.zip runhs.exe
+
+      - name: Attach Linux artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: linux.zip
+          asset_name: linux.zip
+          asset_content_type: application/zip
+
+      - name: Attach Mac artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: mac.zip
+          asset_name: mac.zip
+          asset_content_type: application/zip
+
+      - name: Attach Windows artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: windows.zip
+          asset_name: windows.zip
+          asset_content_type: application/zip
+
+      - name: Setup Haskell Stack
+        uses: actions/setup-haskell@v1.1.2
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: latest
+
+      - name: Publish to Hackage
+        env:
+          HACKAGE_USERNAME: ${{ secrets.hackage_username }}
+          HACKAGE_PASSWORD: ${{ secrets.hackage_password }}
+        run: |
+          stack config set save-hackage-creds false
+          stack upload .
